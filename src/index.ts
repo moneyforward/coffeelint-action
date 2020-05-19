@@ -1,14 +1,49 @@
-import Analyzer from './analyzer';
+import stream from 'stream';
+import util from 'util';
+import StaticCodeAnalyzer, { AnalyzerConstructorParameter } from '@moneyforward/sca-action-core';
+import { transform } from '@moneyforward/stream-util';
 
-console.log('::echo::%s', process.env['RUNNER_DEBUG'] === '1' ? 'on' : 'off');
-(async (): Promise<void> => {
-  const files = process.env.INPUT_FILES || '.';
-  const options = JSON.parse(process.env.INPUT_OPTIONS || '[]');
-  const workingDirectory = process.env.INPUT_WORKING_DIRECTORY;
-  workingDirectory && process.chdir(workingDirectory);
-  const analyzer = new Analyzer(options);
-  process.exitCode = await analyzer.analyze(files);
-})().catch(reason => {
-  console.log(`::error::${String(reason)}`);
-  process.exit(1);
-});
+const debug = util.debuglog('@moneyforward/code-review-action-coffeelint-plugin');
+
+export interface Result {
+  [path: string]: {
+    rule: string;
+    lineNumber: number;
+    level: 'error' | 'warn';
+    message: string;
+    context: string;
+  }[];
+}
+
+export default class Analyzer extends StaticCodeAnalyzer {
+  constructor(...args: AnalyzerConstructorParameter[]) {
+    super('npx', ['-p', '@coffeelint/cli', 'coffeelint'].concat(args.map(String)).concat(['--reporter', 'raw']), undefined, 2, undefined, 'CoffeeLint');
+  }
+
+  protected prepare(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  protected createTransformStreams(): stream.Transform[] {
+    return [
+      new transform.JSON(),
+      new stream.Transform({
+        objectMode: true,
+        transform: function (result: Result, encoding, done): void {
+          Object.entries(result)
+          debug(`Detected %d problem(s).`, Object.keys(result).length);
+          for (const [filename, errors] of Object.entries(result)) for (const error of errors) this.push({
+            file: filename,
+            line: error.lineNumber,
+            column: undefined,
+            severity: error.level === 'warn' ? 'warning' : 'error',
+            message: `${error.message}. ${error.context}`,
+            code: error.rule
+          });
+          this.push(null);
+          done();
+        }
+      })
+    ];
+  }
+}
